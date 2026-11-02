@@ -1,0 +1,318 @@
+import { test, expect } from '@playwright/test';
+import axe from 'axe-core';
+
+for (const width of [360, 390, 768, 1024, 1440, 1920]) {
+  test(`no horizontal overflow and all regions available at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto('/');
+    await expect(page.locator('.region')).toHaveCount(6);
+    const overflow = await page.evaluate(() => ({ scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth }));
+    expect(overflow.scroll).toBeLessThanOrEqual(overflow.client);
+  });
+}
+
+test('keyboard opens About, moves focus, closes and restores it', async ({ page }) => {
+  await page.goto('/');
+  const about = page.locator('.region-about');
+  await about.focus();
+  await expect(about).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#sheet-title')).toHaveText('About');
+  await expect(page.locator('#sheet-title')).toBeFocused();
+  await expect(page).toHaveURL(/#about$/);
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.sheet')).toHaveCount(0);
+  await expect(about).toBeFocused();
+});
+
+test('hover and focus lift a region and illuminate the label', async ({ page }) => {
+  await page.goto('/');
+  const about = page.locator('.region-about');
+  const initial = await about.evaluate((element) => getComputedStyle(element).transform);
+  await about.hover();
+  await page.waitForTimeout(250);
+  const hovered = await about.evaluate((element) => getComputedStyle(element).transform);
+  expect(hovered).not.toBe(initial);
+  await expect(about.locator('.region-label')).toHaveCSS('color', 'rgb(216, 250, 255)');
+  await page.mouse.move(0, 0); await about.focus();
+  await expect(about.locator('.region-label')).toHaveCSS('color', 'rgb(216, 250, 255)');
+});
+
+test('rapid selection and browser history remain synchronized', async ({ page }) => {
+  await page.goto('/');
+  await page.locator('.region-about').click();
+  await page.locator('.region-projects').click();
+  await expect(page.locator('.sheet')).toHaveCount(1);
+  await expect(page.locator('#sheet-title')).toHaveText('Projects');
+  await expect(page.locator('.region-projects')).toHaveAttribute('aria-pressed', 'true');
+  await page.goBack();
+  await expect(page.locator('#sheet-title')).toHaveText('About');
+  await expect(page.locator('.region-about')).toHaveAttribute('aria-pressed', 'true');
+});
+
+test('mobile menu and touch controls activate the same sheet', async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+  const page = await context.newPage(); await page.goto('/');
+  await page.getByRole('button', { name: 'Menu' }).tap();
+  await expect(page.getByRole('button', { name: 'Menu' })).toHaveAttribute('aria-expanded', 'true');
+  await page.getByRole('link', { name: 'Skills', exact: true }).tap();
+  await expect(page.locator('#sheet-title')).toHaveText('Skills');
+  await page.locator('.mobile-controls').getByRole('button', { name: /About/ }).tap();
+  await expect(page.locator('#sheet-title')).toHaveText('About');
+  await context.close();
+});
+
+for (const width of [390, 1440]) {
+  test(`reduced motion holds plan and region transforms fixed at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.emulateMedia({ reducedMotion: 'reduce' }); await page.goto('/');
+    await page.waitForSelector('html.js');
+    const plan = page.locator('.plan');
+    const baseline = await plan.evaluate(el => getComputedStyle(el).transform);
+    for (const id of ['about', 'experience', 'education', 'skills', 'projects', 'contact']) {
+      const region = page.locator(`.region-${id}`);
+      const regionBaseline = await region.evaluate(el => getComputedStyle(el).transform);
+      await region.focus();
+      expect(await region.evaluate(el => getComputedStyle(el).transform)).toBe(regionBaseline);
+      await page.keyboard.press('Enter');
+      await expect(region).toHaveAttribute('aria-pressed', 'true');
+      expect(await plan.evaluate(el => getComputedStyle(el).transform)).toBe(baseline);
+      expect(await region.evaluate(el => getComputedStyle(el).transform)).toBe(regionBaseline);
+      await expect(page.locator('.sheet')).toHaveCSS('animation-name', 'none');
+      await expect(page.locator('.sheet')).toHaveCSS('transform', 'none');
+    }
+    await page.keyboard.press('Escape');
+    expect(await plan.evaluate(el => getComputedStyle(el).transform)).toBe(baseline);
+  });
+}
+
+for (const width of [768, 1024, 1440, 1920]) {
+  test(`plan and selected regions remain framed at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 }); await page.goto('/');
+    await page.waitForSelector('html.js');
+    for (const id of ['overview', 'about', 'experience', 'education', 'skills', 'projects', 'contact']) {
+      if (id !== 'overview') {
+        await page.locator(`.region-${id}`).evaluate((el: HTMLElement) => el.click());
+        await page.waitForTimeout(550);
+      }
+      await page.locator('.blueprint-frame').scrollIntoViewIfNeeded();
+      const margins = await page.evaluate((id) => {
+        const frame = document.querySelector('.blueprint-frame')!.getBoundingClientRect();
+        const plan = document.querySelector('.plan')!.getBoundingClientRect();
+        const item = id === 'overview' ? plan : document.querySelector(`.region-${id} .region-label`)!.getBoundingClientRect();
+        const insets = (box: DOMRect) => [box.left - frame.left, frame.right - box.right, box.top - frame.top, frame.bottom - box.bottom];
+        return { plan: insets(plan), label: insets(item) };
+      }, id);
+      expect(Math.min(...margins.plan), `${id} plan`).toBeGreaterThanOrEqual(20);
+      expect(Math.min(...margins.label), `${id} label`).toBeGreaterThanOrEqual(20);
+      const coveredLabels = await page.locator('.region-label').evaluateAll(labels => labels.flatMap(label => {
+        const rect = label.getBoundingClientRect();
+        const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+        return hit?.closest('.region') === label.closest('.region') ? [] : [label.textContent];
+      }));
+      expect(coveredLabels, `${id}: neighboring labels must remain uncovered`).toEqual([]);
+    }
+  });
+}
+
+for (const width of [360, 390]) test(`mobile touch switches and closes each section with adequate targets at ${width}px`, async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width, height: 844 }, hasTouch: true, isMobile: true });
+  const page = await context.newPage(); await page.goto('/');
+  for (const name of ['About', 'Experience', 'Education', 'Skills', 'Projects', 'Contact']) {
+    const button = page.locator('.mobile-controls').getByRole('button', { name: new RegExp(name) });
+    const rect = await button.boundingBox();
+    expect(rect!.width).toBeGreaterThanOrEqual(44); expect(rect!.height).toBeGreaterThanOrEqual(44);
+    await button.tap();
+    await expect(page.locator('#sheet-title')).toHaveText(name);
+    await expect(button).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.locator('.sheet')).toHaveCount(1);
+  }
+  const close = page.locator('.sheet').getByRole('button', { name: /Close/ });
+  const rect = await close.boundingBox(); expect(rect!.width).toBeGreaterThanOrEqual(44); expect(rect!.height).toBeGreaterThanOrEqual(44);
+  await close.tap(); await expect(page.locator('.sheet')).toHaveCount(0);
+  await expect(page.locator('.mobile-controls').getByRole('button', { name: /Contact/ })).toBeFocused();
+  const menu = page.getByRole('button', { name: 'Menu' });
+  const menuBox = await menu.boundingBox(); expect(menuBox!.width).toBeGreaterThanOrEqual(44); expect(menuBox!.height).toBeGreaterThanOrEqual(44);
+  await menu.tap();
+  for (const link of await page.locator('#header-nav a').all()) {
+    const box = await link.boundingBox(); expect(box!.width).toBeGreaterThanOrEqual(44); expect(box!.height).toBeGreaterThanOrEqual(44);
+  }
+  await page.getByRole('link', { name: 'About', exact: true }).tap();
+  await expect(page.locator('#sheet-title')).toHaveText('About');
+  await expect(menu).toHaveAttribute('aria-expanded', 'false');
+  await context.close();
+});
+
+test('keyboard traversal and Escape work for menu and sheet', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 }); await page.goto('/');
+  await page.keyboard.press('Tab'); await expect(page.locator('.skip-link')).toBeFocused();
+  await page.keyboard.press('Tab'); await expect(page.locator('.wordmark')).toBeFocused();
+  await page.keyboard.press('Tab'); const menu = page.getByRole('button', { name: 'Menu' }); await expect(menu).toBeFocused();
+  await page.keyboard.press('Enter'); await expect(menu).toHaveAttribute('aria-expanded', 'true');
+  await page.keyboard.press('Tab'); await expect(page.getByRole('link', { name: 'About', exact: true })).toBeFocused();
+  await page.keyboard.press('Escape'); await expect(menu).toBeFocused(); await expect(menu).toHaveAttribute('aria-expanded', 'false');
+  await page.keyboard.press('Enter'); await page.keyboard.press('Tab'); await page.keyboard.press('Enter');
+  await expect(page.locator('#sheet-title')).toBeFocused(); await page.keyboard.press('Escape');
+  await expect(page.locator('.sheet')).toHaveCount(0); await expect(menu).toBeFocused();
+});
+
+
+test('desktop keyboard traversal follows all six regions and Space activates a sheet', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 }); await page.goto('/'); await page.waitForSelector('html.js');
+  await page.keyboard.press('Tab'); await expect(page.locator('.skip-link')).toBeFocused();
+  await page.keyboard.press('Tab'); await expect(page.locator('.wordmark')).toBeFocused();
+  for (const name of ['About', 'Experience', 'Education', 'Skills', 'Projects', 'Contact']) {
+    await page.keyboard.press('Tab'); await expect(page.locator('#header-nav').getByRole('link', { name, exact: true })).toBeFocused();
+  }
+  for (const id of ['about', 'experience', 'education', 'skills', 'projects', 'contact']) {
+    await page.keyboard.press('Tab'); await expect(page.locator(`.region-${id}`)).toBeFocused();
+  }
+  await page.keyboard.press('Space'); await expect(page.locator('#sheet-title')).toHaveText('Contact');
+  await expect(page.locator('#sheet-title')).toBeFocused(); await page.keyboard.press('Escape');
+  await expect(page.locator('.region-contact')).toBeFocused();
+});
+
+test('enabling reduced motion while a sheet is open keeps the selected state', async ({ page }) => {
+  await page.goto('/'); await page.locator('.region-about').click();
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  const current = await page.locator('.plan').evaluate(el => getComputedStyle(el).transform);
+  await page.locator('.region-projects').evaluate((el: HTMLElement) => el.click());
+  expect(await page.locator('.plan').evaluate(el => getComputedStyle(el).transform)).toBe(current);
+  await expect(page.locator('.region-projects')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#sheet-title')).toHaveText('Projects');
+});
+
+test('unsupported CSS triggers working non-3D fallback', async ({ page }) => {
+  await page.addInitScript(() => { const original = CSS.supports.bind(CSS); CSS.supports = ((property: string, value?: string) => property === 'transform-style' ? false : original(property, value || '')) as typeof CSS.supports; });
+  await page.goto('/');
+  await expect(page.locator('.fallback')).toBeVisible();
+  await page.locator('.fallback').getByRole('button', { name: /About/ }).click();
+  await expect(page.locator('#sheet-title')).toHaveText('About');
+});
+
+test('profile and section navigation remain usable without JavaScript', async ({ browser }) => {
+  const context = await browser.newContext({ javaScriptEnabled: false });
+  const page = await context.newPage(); await page.goto('/');
+  await expect(page.locator('#about')).toContainText('Computer Science graduate');
+  await expect(page.locator('#projects')).toBeAttached();
+  await page.getByRole('link', { name: 'About', exact: true }).click();
+  await expect(page).toHaveURL(/#about$/);
+  await context.close();
+});
+
+test('invalid hash leaves a usable overview', async ({ page }) => {
+  await page.goto('/#not-a-section'); await expect(page.locator('.sheet')).toHaveCount(0);
+  await page.locator('.region-contact').click(); await expect(page.locator('#sheet-title')).toHaveText('Contact');
+});
+
+test('mobile no-JS menu opens and navigation reaches content', async ({ browser }) => {
+  const context = await browser.newContext({ javaScriptEnabled: false, viewport: { width: 390, height: 844 } });
+  const page = await context.newPage(); await page.goto('/');
+  await page.locator('.no-js-menu summary').focus(); await page.keyboard.press('Enter');
+  const link = page.getByRole('link', { name: 'About', exact: true });
+  await expect(link).toBeVisible(); await link.click();
+  await expect(page).toHaveURL(/#about$/); await expect(page.locator('#about')).toBeVisible();
+  await context.close();
+});
+
+test('closing a sheet opened from the mobile menu returns focus to its menu button', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 }); await page.goto('/');
+  const menu = page.getByRole('button', { name: 'Menu' }); await menu.click();
+  await page.getByRole('link', { name: 'About', exact: true }).click();
+  await page.keyboard.press('Escape'); await expect(menu).toBeFocused();
+});
+
+for (const state of ['overview', 'sheet', 'mobile-menu', 'mobile-sheet', 'reduced-motion', 'fallback'] as const) {
+  test(`automated accessibility check: ${state}`, async ({ page }) => {
+    if (state === 'mobile-menu' || state === 'mobile-sheet') await page.setViewportSize({ width: 390, height: 844 });
+    if (state === 'reduced-motion') await page.emulateMedia({ reducedMotion: 'reduce' });
+    await page.goto('/');
+    if (state === 'sheet' || state === 'reduced-motion') await page.locator('.region-about').click();
+    if (state === 'mobile-sheet') await page.locator('.mobile-controls').getByRole('button', { name: /About/ }).click();
+    if (state === 'mobile-menu') await page.getByRole('button', { name: 'Menu' }).click();
+    if (state === 'fallback') await page.getByRole('button', { name: 'Use simplified plan' }).click();
+    if (['sheet', 'mobile-sheet', 'reduced-motion'].includes(state)) {
+      await page.locator('.sheet').evaluate(async el => { await Promise.all(el.getAnimations().map(animation => animation.finished)); });
+    }
+    await page.evaluate(axe.source);
+    const violations = await page.evaluate(async () => {
+      const result = await (window as unknown as { axe: typeof axe }).axe.run(document, { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] } });
+      return result.violations.map(v => ({ id: v.id, impact: v.impact, nodes: v.nodes.map(n => n.target) }));
+    });
+    expect(violations).toEqual([]);
+  });
+}
+
+test('experience and education sheets match their semantic CV records', async ({ page }) => {
+  await page.goto('/');
+  for (const [id, text] of [['experience', 'Neurofive Solutions'], ['education', 'Iqra University']] as const) {
+    await expect(page.locator(`#${id}`)).toContainText(text);
+    await page.locator(`.region-${id}`).click();
+    await expect(page.locator('.sheet')).toContainText(text);
+    await expect(page.locator('#sheet-title')).toBeFocused();
+  }
+  await expect(page.locator('#experience')).toContainText('need confirmation before publication');
+});
+
+test('skills and projects render in both the sheet and static CV', async ({ page }) => {
+  await page.goto('/');
+  for (const [id, text] of [['skills', 'Frontend development'], ['projects', 'SignalCV']] as const) {
+    await expect(page.locator(`#${id}`)).toContainText(text);
+    await page.locator(`.region-${id}`).click();
+    await expect(page.locator('.sheet')).toContainText(text);
+  }
+  await expect(page.locator('.sheet')).toContainText('deterministic mock services');
+  await expect(page.locator('.sheet').getByRole('link', { name: /View Daymark repository/ })).toHaveAttribute('href', 'https://github.com/jediah-dsouza/Daymark');
+});
+
+test('contact sheet and text view expose the same direct actions', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.locator('#contact').getByRole('link', { name: 'jediahdsouza4@gmail.com' })).toHaveAttribute('href', 'mailto:jediahdsouza4@gmail.com');
+  await page.locator('.region-contact').click();
+  await expect(page.locator('.sheet').getByRole('link', { name: 'jediahdsouza4@gmail.com' })).toHaveAttribute('href', 'mailto:jediahdsouza4@gmail.com');
+  await expect(page.locator('.sheet').getByRole('link', { name: 'linkedin.com/in/jediah-dsouza' })).toHaveAttribute('href', 'https://www.linkedin.com/in/jediah-dsouza');
+});
+
+test('all semantic sections contain real content, with no prototype placeholders', async ({ browser }) => {
+  const context = await browser.newContext({ javaScriptEnabled: false });
+  const page = await context.newPage(); await page.goto('/');
+  for (const [id, content] of [['about', 'Computer Science graduate'], ['experience', 'Neurofive Solutions'], ['education', 'Iqra University'], ['skills', 'Frontend development'], ['projects', 'SignalCV'], ['contact', 'jediahdsouza4@gmail.com']]) await expect(page.locator(`#${id}`)).toContainText(content);
+  await expect(page.locator('body')).not.toContainText('prototype stage');
+  await context.close();
+});
+
+test('each blueprint, header, fallback and mobile path opens its matching complete sheet', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 }); await page.goto('/');
+  const cases = [['about', 'Computer Science graduate'], ['experience', 'Neurofive Solutions'], ['education', 'Iqra University'], ['skills', 'Frontend development'], ['projects', 'SignalCV'], ['contact', 'jediahdsouza4@gmail.com']] as const;
+  for (const [id, content] of cases) {
+    await page.locator(`.region-${id}`).click(); await expect(page.locator('.sheet')).toContainText(content); await expect(page).toHaveURL(new RegExp(`#${id}$`));
+  }
+  for (const [id, content] of cases) {
+    await page.locator(`#header-nav a[href="#${id}"]`).click(); await expect(page.locator('.sheet')).toContainText(content);
+  }
+  await page.getByRole('button', { name: 'Use simplified plan' }).click();
+  for (const [id, content] of cases) {
+    await page.locator('.fallback-controls').getByRole('button', { name: new RegExp(id, 'i') }).click(); await expect(page.locator('.sheet')).toContainText(content);
+  }
+});
+
+test('close remains reachable while reading the long mobile projects sheet', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 }); await page.goto('/');
+  const trigger = page.locator('.mobile-controls').getByRole('button', { name: /Projects/ }); await trigger.click();
+  const sheet = page.locator('.sheet'); await sheet.getByRole('heading', { name: 'Secure Enterprise Network Design' }).scrollIntoViewIfNeeded();
+  const close = sheet.locator('.sheet-heading').getByRole('button', { name: /Close/ });
+  await expect(close).toBeInViewport(); await close.click(); await expect(sheet).toHaveCount(0); await expect(trigger).toBeFocused();
+});
+
+for (const width of [390, 1440]) for (const id of ['about', 'experience', 'education', 'skills', 'projects', 'contact']) {
+  test(`full ${id} sheet passes automated accessibility checks at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 844 }); await page.goto('/');
+    await page.locator(`.region-${id}`).evaluate((el: HTMLElement) => el.click());
+    await page.locator('.sheet').evaluate(async el => { await Promise.all(el.getAnimations().map(animation => animation.finished)); });
+    await page.evaluate(axe.source);
+    const violations = await page.evaluate(async () => (await (window as unknown as { axe: typeof axe }).axe.run(document, { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] } })).violations.map(v => ({ id: v.id, nodes: v.nodes.map(n => n.target) })));
+    expect(violations).toEqual([]);
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    expect(overflow).toBeLessThanOrEqual(0);
+  });
+}
