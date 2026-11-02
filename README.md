@@ -1,4 +1,4 @@
-# Blueprint CV — phase 2 local review
+# Blueprint CV / PORTFOLIO
 
 A six-section professional portfolio rebuilt in the approved architectural-blueprint language using Next.js static export and CSS 3D. The text profile and all source-backed content remain available without JavaScript; a simplified plan is available if 3D is unsupported or unwanted. **Not approved for publication.**
 
