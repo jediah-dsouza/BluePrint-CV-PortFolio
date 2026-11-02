@@ -52,12 +52,6 @@ The interface uses CSS 3D to create its architectural presentation, with a simpl
 
 ### Installation
 
-Clone the repository:
-
-```bash
-git clone https://github.com/jediah-dsouza/BluePrint-CV-PortFolio.git
-```
-
 Navigate into the project directory:
 
 ```bash
